@@ -1,0 +1,21 @@
+name: Community Compute
+on:
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      prompt:
+        description: '输入提示词'
+        required: true
+        default: '默认提示'
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run script
+        env:
+          API_KEY: ${{ secrets.COMMUNITY_API_KEY }}
+        run: |
+          # 使用 API_KEY 执行计算，并生成存证
+          echo "NCA-COMMUNITY-$(date +'%Y%m%d')" > evidence.txt
+          cat evidence.txt
