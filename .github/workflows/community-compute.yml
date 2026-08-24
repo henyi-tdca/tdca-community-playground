@@ -1,0 +1,119 @@
+# Community Compute — TDCA 社区算力体验工作流（SKY 账号）
+#
+# 用途: 社区 Key 经 GitHub Secrets 注入（永不落盘），调用 deepseek-v4-flash（仅 Flash），
+#       每次调用生成 NCA-COMMUNITY-XXX 匿名存证（TDCA-COMMUNITY-LEDGER-001）。
+# 触发: workflow_dispatch（手动/API 触发，供社区体验）
+# 纪律: Key 仅环境变量；匿名审计（ID92）；消耗 SIMULATED 标注；主算力零提及（V1.2）。
+# 修正记录（Kimi 线 2026-08-24，随批报备）:
+#   ① prompt 经 python3 json.dumps 构造载荷（原 inline 拼接触遇引号即破坏 JSON）
+#   ② 台账文件名加时分秒（原按日命名，同日二次调用互相覆盖，审计台账不可覆盖）
+#   ③ 内置熔断守卫步骤（单日 >¥5 / 月度 >¥20 拒绝执行——fail-closed 前置，不等每日观察）
+name: community-compute
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "体验提示词（flash 模型）"
+        required: true
+        type: string
+      purpose_tag:
+        description: "用途标签（playground | ecoscan | docs）"
+        required: false
+        default: "playground"
+        type: string
+
+permissions:
+  contents: write   # 追加审计台账
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 熔断守卫（fail-closed：单日 >¥5 / 月度 >¥20 拒绝执行）
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import glob, json, os, sys, datetime
+          today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
+          month = today[:6]
+          day_sum = mon_sum = 0.0
+          for f in glob.glob(".tdca-nca/services/community/NCA-COMMUNITY-*.json"):
+              try:
+                  d = json.load(open(f, encoding="utf-8"))
+                  c = float(d.get("est_cost_cny", 0))
+              except Exception:
+                  continue
+              base = os.path.basename(f)
+              if f"NCA-COMMUNITY-{today}" in base: day_sum += c
+              if f"NCA-COMMUNITY-{month}" in base: mon_sum += c
+          print(f"守卫读数: 今日 ¥{day_sum:.4f} / 本月 ¥{mon_sum:.4f}（阈值: 日 ¥5 / 月 ¥20）")
+          if day_sum > 5 or mon_sum > 20:
+              print("::error::熔断触发（单日>¥5 或 月度>¥20）——拒绝调用，请人工吊销换新 Key")
+              sys.exit(1)
+          PYEOF
+
+      - name: Call flash + audit
+        env:
+          COMMUNITY_API_KEY: ${{ secrets.COMMUNITY_API_KEY }}
+          PROMPT: ${{ github.event.inputs.prompt }}
+          PURPOSE: ${{ github.event.inputs.purpose_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${COMMUNITY_API_KEY:-}" ]; then
+            echo "::error::COMMUNITY_API_KEY 未配置（Secrets 缺失）——无存证不执行（fail-closed）"
+            exit 1
+          fi
+          # 匿名调用 ID（哈希化，不可反推）
+          ANON_ID="anon-$(printf '%s' "$(date +%s%N)$RANDOM" | sha256sum | cut -c1-12)"
+          # JSON 安全载荷（提示词含引号/换行不破坏结构）
+          PAYLOAD=$(python3 -c "import json,os;print(json.dumps({'model':'deepseek-v4-flash','messages':[{'role':'user','content':os.environ['PROMPT']}],'max_tokens':256},ensure_ascii=False))")
+          # 调用 deepseek-v4-flash（Chat Completions 兼容端点）
+          RESP=$(curl -sS -X POST "https://api.deepseek.com/v1/chat/completions" \
+            -H "Authorization: Bearer ${COMMUNITY_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+          # 提取 tokens 与内容（容错：解析失败仍记审计）
+          TOKENS=$(printf '%s' "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('usage',{}).get('total_tokens','0'))" 2>/dev/null || echo "0")
+          CONTENT=$(printf '%s' "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" 2>/dev/null || echo "ERROR")
+          # 估算成本（SIMULATED，Flash 假设 ¥1/百万 token 量级）
+          EST_COST=$(python3 -c "print(round(${TOKENS}/1000000.0*1.0, 6))" 2>/dev/null || echo "0")
+          # NCA-COMMUNITY 存证（匿名；文件名到秒——同日多次调用不互相覆盖）
+          SEQ=$(date -u +%Y%m%d-%H%M%S)
+          NCA_ID="NCA-COMMUNITY-${SEQ}"
+          mkdir -p .tdca-nca/services/community
+          cat > .tdca-nca/services/community/${NCA_ID}.json <<EOF
+          {
+            "NCA-ID": "${NCA_ID}",
+            "Operation-Type": "CommunityCompute",
+            "Operator": "community-ledger（自动化）",
+            "Timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "anonymous_call_id": "${ANON_ID}",
+            "model": "deepseek-v4-flash",
+            "tokens_used": ${TOKENS},
+            "est_cost_cny": ${EST_COST},
+            "purpose_tag": "${PURPOSE}",
+            "status": "ok"
+          }
+          EOF
+          echo "=== 响应 ==="
+          printf '%s
+' "$CONTENT" | head -c 800
+          echo ""
+          echo "=== 审计 ==="
+          echo "NCA: ${NCA_ID} | anon: ${ANON_ID} | tokens: ${TOKENS} | est ¥${EST_COST}（SIMULATED）"
+
+      - name: Commit audit ledger
+        run: |
+          git config user.name "community-ledger"
+          git config user.email "community-ledger@tdca.local"
+          git add .tdca-nca/services/community/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "无台账变更（幂等）"
+          else
+            git commit -m "docs(community): NCA-COMMUNITY 审计台账（匿名消耗存证）"
+            git push origin HEAD
+          fi
