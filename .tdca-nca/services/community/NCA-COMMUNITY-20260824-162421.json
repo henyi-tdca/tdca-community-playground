@@ -1,0 +1,13 @@
+{
+  "NCA-ID": "NCA-COMMUNITY-20260824-162421",
+  "Operation-Type": "CommunityCompute",
+  "Operator": "community-ledger（自动化）",
+  "Timestamp": "2026-08-24T16:24:21Z",
+  "anonymous_call_id": "anon-812241386290",
+  "model": "deepseek-v4-flash",
+  "tokens_used": 249,
+  "est_cost_cny": 0.000249,
+  "purpose_tag": "playground",
+  "admission": "enforce_check PASS（协议闸门已验）",
+  "status": "ok"
+}
