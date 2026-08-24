@@ -100,8 +100,7 @@ jobs:
           }
           EOF
           echo "=== 响应 ==="
-          printf '%s
-' "$CONTENT" | head -c 800
+          printf '%s\n' "$CONTENT" | head -c 800
           echo ""
           echo "=== 审计 ==="
           echo "NCA: ${NCA_ID} | anon: ${ANON_ID} | tokens: ${TOKENS} | est ¥${EST_COST}（SIMULATED）"
