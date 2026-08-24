@@ -1,13 +1,16 @@
 # Community Compute — TDCA 社区算力体验工作流（SKY 账号）
 #
-# 用途: 社区 Key 经 GitHub Secrets 注入（永不落盘），调用 deepseek-v4-flash（仅 Flash），
+# 用途: 社区 Key 经 GitHub Secrets 注入（永不落盘），调用 deepseek-v4-flash（仅 Flash，硬编码不可覆盖），
 #       每次调用生成 NCA-COMMUNITY-XXX 匿名存证（TDCA-COMMUNITY-LEDGER-001）。
 # 触发: workflow_dispatch（手动/API 触发，供社区体验）
 # 纪律: Key 仅环境变量；匿名审计（ID92）；消耗 SIMULATED 标注；主算力零提及（V1.2）。
-# 修正记录（Kimi 线 2026-08-24，随批报备）:
-#   ① prompt 经 python3 json.dumps 构造载荷（原 inline 拼接触遇引号即破坏 JSON）
-#   ② 台账文件名加时分秒（原按日命名，同日二次调用互相覆盖，审计台账不可覆盖）
-#   ③ 内置熔断守卫步骤（单日 >¥5 / 月度 >¥20 拒绝执行——fail-closed 前置，不等每日观察）
+# 闸门（2026-08-24 协议闸门保护上线，GSEQ-0427 后续裁定）:
+#   ① 协议准入前置——enforce_check（AgentCard + 公理 6 反函数验证）未过则 fail-closed，零消耗
+#   ② 熔断守卫——单日 >¥2 / 月度 >¥8 拒绝执行（前置拦单次）
+#   ③ Flash-only——模型硬编码 deepseek-v4-flash，任何输入不可覆盖
+# 修正记录（Kimi 线）:
+#   ① prompt 经 python3 json.dumps 构造载荷（防引号破坏 JSON）
+#   ② 台账文件名到秒（同日多次调用不互相覆盖）
 name: community-compute
 
 on:
@@ -15,6 +18,10 @@ on:
     inputs:
       prompt:
         description: "体验提示词（flash 模型）"
+        required: true
+        type: string
+      agent_card:
+        description: "AgentCard JSON（agent_id/protocol_version/scene_id/role/allowed_calls/nsfl_boundary）——准入闸门必填"
         required: true
         type: string
       purpose_tag:
@@ -33,7 +40,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 熔断守卫（fail-closed：单日 >¥5 / 月度 >¥20 拒绝执行）
+      - name: 熔断守卫（fail-closed：单日 >¥2 / 月度 >¥8 拒绝执行）
         run: |
           set -euo pipefail
           python3 - <<'PYEOF'
@@ -50,10 +57,52 @@ jobs:
               base = os.path.basename(f)
               if f"NCA-COMMUNITY-{today}" in base: day_sum += c
               if f"NCA-COMMUNITY-{month}" in base: mon_sum += c
-          print(f"守卫读数: 今日 ¥{day_sum:.4f} / 本月 ¥{mon_sum:.4f}（阈值: 日 ¥5 / 月 ¥20）")
-          if day_sum > 5 or mon_sum > 20:
-              print("::error::熔断触发（单日>¥5 或 月度>¥20）——拒绝调用，请人工吊销换新 Key")
+          print(f"守卫读数: 今日 ¥{day_sum:.4f} / 本月 ¥{mon_sum:.4f}（阈值: 日 ¥2 / 月 ¥8）")
+          if day_sum > 2 or mon_sum > 8:
+              print("::error::熔断触发（单日>¥2 或 月度>¥8）——拒绝调用，请人工吊销换新 Key")
               sys.exit(1)
+          PYEOF
+
+      - name: 协议准入闸门（enforce_check + 公理 6——未过 fail-closed 零消耗）
+        env:
+          AGENT_CARD: ${{ github.event.inputs.agent_card }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AGENT_CARD:-}" ]; then
+            echo "::error::agent_card 缺失——无协议不调用（fail-closed，零消耗）"
+            exit 1
+          fi
+          git clone --depth 1 https://github.com/henyi-tdca/tdca-protocol.git /tmp/tdca-protocol
+          cd /tmp/tdca-protocol/core-go && go build -o /tmp/tdcad ./cmd/tdcad && cd "$GITHUB_WORKSPACE"
+          python3 - <<'PYEOF'
+          import json, os, subprocess, sys
+          try:
+              card = json.loads(os.environ.get("AGENT_CARD", ""))
+          except Exception as e:
+              print(f"::error::agent_card 不是合法 JSON（{e}）——fail-closed 零消耗")
+              sys.exit(1)
+          proc = subprocess.Popen(["/tmp/tdcad", "mcp", "serve"], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, text=True, encoding="utf-8")
+          def call(method, params=None):
+              req = {"jsonrpc": "2.0", "id": 1, "method": method}
+              if params: req["params"] = params
+              proc.stdin.write(json.dumps(req) + "\n"); proc.stdin.flush()
+              return json.loads(proc.stdout.readline())
+          try:
+              resp = call("tools/call", {"name": "enforce_check", "arguments": {"agent_card": card}})
+              if "error" in resp:
+                  msg = str(resp["error"].get("message", ""))[:100]
+                  print(f"::error::准入被拒（{msg}）——fail-closed 零消耗")
+                  sys.exit(1)
+              text = resp.get("result", {}).get("content", [{}])[0].get("text", "{}")
+              status = json.loads(text).get("status")
+              print(f"enforce_check 结果: {status}")
+              if status != "PASS":
+                  print(f"::error::准入未过（{status}）——fail-closed 零消耗")
+                  sys.exit(1)
+              print("✅ 协议准入 PASS（公理 6 反函数验证通过）——放行调用")
+          finally:
+              proc.terminate()
           PYEOF
 
       - name: Call flash + audit
@@ -69,9 +118,8 @@ jobs:
           fi
           # 匿名调用 ID（哈希化，不可反推）
           ANON_ID="anon-$(printf '%s' "$(date +%s%N)$RANDOM" | sha256sum | cut -c1-12)"
-          # JSON 安全载荷（提示词含引号/换行不破坏结构）
+          # JSON 安全载荷（提示词含引号/换行不破坏结构）；模型硬编码 deepseek-v4-flash（Flash-only，不可覆盖）
           PAYLOAD=$(python3 -c "import json,os;print(json.dumps({'model':'deepseek-v4-flash','messages':[{'role':'user','content':os.environ['PROMPT']}],'max_tokens':256},ensure_ascii=False))")
-          # 调用 deepseek-v4-flash（Chat Completions 兼容端点）
           RESP=$(curl -sS -X POST "https://api.deepseek.com/v1/chat/completions" \
             -H "Authorization: Bearer ${COMMUNITY_API_KEY}" \
             -H "Content-Type: application/json" \
@@ -96,6 +144,7 @@ jobs:
             "tokens_used": ${TOKENS},
             "est_cost_cny": ${EST_COST},
             "purpose_tag": "${PURPOSE}",
+            "admission": "enforce_check PASS（协议闸门已验）",
             "status": "ok"
           }
           EOF
@@ -113,6 +162,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "无台账变更（幂等）"
           else
-            git commit -m "docs(community): NCA-COMMUNITY 审计台账（匿名消耗存证）"
+            git commit -m "docs(community): NCA-COMMUNITY 审计台账（匿名消耗存证，协议准入已验）"
             git push origin HEAD
           fi
