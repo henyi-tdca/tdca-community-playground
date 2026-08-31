@@ -1,0 +1,81 @@
+# Coldstart Real Rerun — TDCA 冷启动真调重跑工作流（GSEQ-0785 路径 A）
+#
+# 用途: 社区 key 在 GitHub Secrets 不可读明文 → 重跑必须在 Actions 内执行（secrets 注入）。
+#       三段式（准入→沙盒→生产）真调 DeepSeek → 贡献 COP → VB 锚定解除 [UNVERIFIED-NO-EXTERNAL-ANCHOR]。
+# 触发: workflow_dispatch（手动/API 触发）
+# 纪律（HANDOFF-KIMI-COLDSTART-REAL-RERUN-001）:
+#   ① Flash-only——模型硬编码 deepseek-v4-flash（禁贵模型，任何输入不可覆盖）
+#   ② 熔断复用——单日 >¥2 / 月度 >¥8 拒绝执行（fail-closed 零消耗）
+#   ③ 凭证零落盘——DEEPSEEK_API_KEY 仅环境变量注入，永不写盘/打印
+#   ④ NCA 隔离命名——NCA-COLDSTART-EXP-*（.tdca-nca/services/coldstart-exp/）
+#   ⑤ 产物提交分支待签批不合并——exp/coldstart-real-rerun-<ts> 分支 + [待签批·勿合并] PR
+name: coldstart-real-rerun
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write        # 推送产物分支
+  pull-requests: write   # 开 [待签批·勿合并] PR
+
+jobs:
+  rerun:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 依赖（pyyaml 机验）
+        run: pip install pyyaml
+
+      - name: 外部锚实核备料（tdca-protocol 浅克隆）
+        run: git clone --depth 1 https://github.com/henyi-tdca/tdca-protocol.git /tmp/tdca-protocol
+
+      - name: 三段式真调重跑（熔断 + Flash-only + 剥围栏机验）
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.COMMUNITY_API_KEY }}
+          TDCA_PROTOCOL_DIR: /tmp/tdca-protocol
+        run: python3 scripts/coldstart_real_rerun.py | tee /tmp/rerun.log
+
+      - name: 提取批次号
+        id: meta
+        run: |
+          SEQ=$(grep -oE 'NCA-COLDSTART-EXP-[0-9]{8}-[0-9]{6}' /tmp/rerun.log | head -1 | sed 's/NCA-COLDSTART-EXP-//')
+          test -n "$SEQ"
+          echo "seq=$SEQ" >> "$GITHUB_OUTPUT"
+
+      - name: 产物提交分支（待签批不合并）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SEQ="${{ steps.meta.outputs.seq }}"
+          BR="exp/coldstart-real-rerun-${SEQ}"
+          git config user.name "community-ledger"
+          git config user.email "community-ledger@tdca.local"
+          git checkout -b "$BR"
+          git add artifacts/coldstart-real-rerun/ .tdca-nca/services/coldstart-exp/
+          if git diff --cached --quiet; then
+            echo "无产物变更（幂等）"
+            exit 0
+          fi
+          git commit -m "exp(coldstart): 真调重跑产物 NCA-COLDSTART-EXP-${SEQ}（Flash-only 三段式，VB 锚定解除，待签批）"
+          git push origin "$BR"
+          BODY=$(printf '%s\n' \
+            "GSEQ-0785 路径 A 重跑产物（Actions 内执行，社区 key Secrets 注入、凭证零落盘）。" \
+            "" \
+            "- 三段式真调 DeepSeek（deepseek-v4-flash，Flash-only 硬编码）" \
+            "- 熔断复用（日¥2/月¥8，fail-closed）" \
+            "- VB 锚定解除 [UNVERIFIED-NO-EXTERNAL-ANCHOR]（protocols/tdca-native 麦肯锡+三十六计实核）" \
+            "- 生产段剥围栏 + yaml 六键机验通过" \
+            "- 存证：.tdca-nca/services/coldstart-exp/NCA-COLDSTART-EXP-${SEQ}.json" \
+            "" \
+            "纪律：本 PR 为产物存证分支，**待创始人签批后方可处置，勿直接合并**。")
+          gh pr create --base main --head "$BR" \
+            --title "[待签批·勿合并] 冷启动真调重跑产物 NCA-COLDSTART-EXP-${SEQ}" \
+            --body "$BODY"
