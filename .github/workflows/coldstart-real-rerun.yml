@@ -40,7 +40,9 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.COMMUNITY_API_KEY }}
           TDCA_PROTOCOL_DIR: /tmp/tdca-protocol
-        run: python3 scripts/coldstart_real_rerun.py | tee /tmp/rerun.log
+        run: |
+          set -o pipefail
+          python3 scripts/coldstart_real_rerun.py 2>&1 | tee /tmp/rerun.log
 
       - name: 提取批次号
         id: meta

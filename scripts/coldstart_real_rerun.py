@@ -22,7 +22,7 @@ import urllib.request
 
 API_URL = "https://api.deepseek.com/v1/chat/completions"
 MODEL = "deepseek-v4-flash"  # Flash-only 硬编码（禁贵模型，不可覆盖）
-MAX_TOKENS = 900
+MAX_TOKENS = 2000  # GSEQ-0791 裁定：900→2000（疑推理耗尽致 content 截空；Flash 成本仍 ¥0.002 级）
 PROTO = os.environ.get("TDCA_PROTOCOL_DIR", "/tmp/tdca-protocol")
 NCA_DIR = ".tdca-nca/services/coldstart-exp"
 ART_DIR = "artifacts/coldstart-real-rerun"
@@ -108,7 +108,17 @@ def call_flash(prompt, phase):
     })
     with urllib.request.urlopen(req, timeout=120) as resp:
         d = json.loads(resp.read().decode("utf-8"))
-    content = d["choices"][0]["message"]["content"]
+    msg = d["choices"][0]["message"]
+    content = msg.get("content") or ""
+    # GSEQ-0791 裁定（副）：content 为空 → 兜底读 reasoning_content（适配推理型产出）；双空 → fail-closed
+    if not content.strip():
+        reasoning = msg.get("reasoning_content") or ""
+        if reasoning.strip():
+            content = reasoning
+            print(f"[{phase}] content 为空，兜底取 reasoning_content（{len(reasoning)} 字符）")
+    if not content.strip():
+        print(f"::error::[{phase}] content 与 reasoning_content 双空——fail-closed 不落盘")
+        sys.exit(1)
     tokens = int(d.get("usage", {}).get("total_tokens", 0))
     est = round(tokens / 1_000_000.0 * 1.0, 6)  # SIMULATED 估算（Flash ¥1/百万 token 量级）
     print(f"[{phase}] tokens={tokens} est ¥{est}（SIMULATED）")
@@ -136,6 +146,9 @@ def main():
         "以 JSON 输出：{\"decision\":..., \"positive_sum\":..., \"honesty\":..., \"nsfl_ok\":...}"
     )
     c1, t1, e1 = call_flash(p1, "段1·准入")
+    if not c1.strip():  # GSEQ-0791 裁定（稳）：段1 非空机验，防盲跑
+        print("::error::段1 产出为空——fail-closed 不进入段2")
+        sys.exit(1)
     phases.append({"phase": "准入", "tokens": t1, "est_cost": e1, "output": c1[:600]})
 
     # —— 段 2 沙盒（VB 重定价，外部锚已实核注入）——
@@ -147,6 +160,9 @@ def main():
         "③沙盒迭代纪律声明（生产落盘严格后置到 mou_ok 之后）。以 JSON 输出。"
     )
     c2, t2, e2 = call_flash(p2, "段2·沙盒")
+    if not c2.strip():  # GSEQ-0791 裁定（稳）：段2 非空机验，防盲跑
+        print("::error::段2 产出为空——fail-closed 不进入段3")
+        sys.exit(1)
     phases.append({"phase": "沙盒", "tokens": t2, "est_cost": e2, "output": c2[:600]})
 
     # —— 段 3 生产（贡献 COP 产出，剥围栏 + 机验，严格后置）——
