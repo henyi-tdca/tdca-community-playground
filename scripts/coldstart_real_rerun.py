@@ -85,6 +85,16 @@ def strip_fence(text):
     return "\n".join(lines).strip()
 
 
+def unwrap(doc, depth=0):
+    """DeepSeek 父键包裹对策（2026-08-31 run 33373466225 实证：产出被单一父键包裹致六键缺验）：
+    顶层非六键且为单键 dict 时下钻，至多 3 层。"""
+    while (isinstance(doc, dict) and not (REQUIRED_KEYS <= set(doc.keys()))
+           and len(doc) == 1 and depth < 3):
+        doc = next(iter(doc.values()))
+        depth += 1
+    return doc, depth
+
+
 def call_flash(prompt, phase):
     """真调 DeepSeek（Flash-only）→ (content, tokens, est_cost)。"""
     payload = json.dumps({
@@ -142,22 +152,27 @@ def main():
     # —— 段 3 生产（贡献 COP 产出，剥围栏 + 机验，严格后置）——
     p3 = (
         "请产出 TDCA 社区贡献 COP《第01条-开源社区冷启动·正和准入》的最终 yaml。\n"
-        "硬性要求：①只输出纯 yaml，禁止 Markdown 围栏（```）②必须包含键："
-        "stratum / verse / core / origin / negative_space / primitive ③provenance 注明"
+        "硬性要求：①只输出纯 yaml，禁止 Markdown 围栏（```）②顶层直接给出六个键："
+        "stratum / verse / core / origin / negative_space / primitive——严禁包裹在任何父键"
+        "（如 第01条:、cop:、title:）之下 ③provenance 注明"
         " data_provenance=mixed（res/batna 自报）④VB 锚定状态 anchored=true（外部锚=麦肯锡+三十六计编译基准）。"
     )
     c3, t3, e3 = call_flash(p3, "段3·生产")
     cop_yaml = strip_fence(c3)
     try:
         doc = yaml.safe_load(cop_yaml)
+        doc, depth = unwrap(doc)
         keys = set(doc.keys()) if isinstance(doc, dict) else set()
     except Exception as ex:
-        print(f"::error::生产段 yaml 机验失败（{ex}）——fail-closed 不落盘")
+        print(f"::error::生产段 yaml 机验失败（{ex}）——fail-closed 不落盘；产出头部：{cop_yaml[:200]!r}")
         sys.exit(1)
     missing = REQUIRED_KEYS - keys
     if missing:
-        print(f"::error::生产段缺键 {sorted(missing)}——fail-closed 不落盘")
+        print(f"::error::生产段缺键 {sorted(missing)}（下钻 {depth} 层后）——fail-closed 不落盘；产出头部：{cop_yaml[:200]!r}")
         sys.exit(1)
+    if depth:
+        cop_yaml = yaml.safe_dump(doc, allow_unicode=True, sort_keys=False)
+        print(f"父键包裹对策生效：下钻 {depth} 层后六键齐全，落盘规范化 yaml")
     print(f"生产段机验通过：keys={sorted(keys)}（剥围栏对策已执行）")
     phases.append({"phase": "生产", "tokens": t3, "est_cost": e3,
                    "output": "yaml 机验通过（六键齐全，围栏已剥）"})
